@@ -577,12 +577,14 @@
         // prefers a master playlist (quality picker) over a media one.
         const payload = encodeURIComponent(JSON.stringify(res.urls));
         const h1 = document.querySelector('h1');
+        const posterImg = document.querySelector('.ipc-poster img');
         // imdb + tv feed the subtitle sidecar lookup in the downloader page.
         const dlUrl = chrome.runtime.getURL('downloader.html')
           + '?urls=' + payload
           + '&title=' + encodeURIComponent((h1 && h1.innerText) || 'video')
           + '&imdb=' + encodeURIComponent(info.imdb_id)
-          + '&tv=' + (isTvType(info.media_type) ? '1' : '0');
+          + '&tv=' + (isTvType(info.media_type) ? '1' : '0')
+          + '&poster=' + encodeURIComponent((posterImg && posterImg.src) || '');
         chrome.runtime.sendMessage({ action: 'open_new_tab', url: dlUrl });
       } catch (e) {
         dlBtn.disabled = false;

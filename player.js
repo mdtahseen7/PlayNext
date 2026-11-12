@@ -52,11 +52,13 @@
     }
     const payload = encodeURIComponent(JSON.stringify(res.urls));
     // imdb + tv feed the subtitle sidecar lookup in the downloader page.
+    const safeTitle = title.replace(/\s*:\s*/g, ' - ').replace(/[\\/:*?"<>|]+/g, '').trim();
     const dlUrl = chrome.runtime.getURL('downloader.html')
       + '?urls=' + payload
-      + '&title=' + encodeURIComponent(title.replace(/[\\/:*?"<>|]+/g, '_'))
+      + '&title=' + encodeURIComponent(safeTitle)
       + '&imdb=' + encodeURIComponent(imdbId)
-      + '&tv=' + (isTv ? '1' : '0');
+      + '&tv=' + (isTv ? '1' : '0')
+      + '&poster=' + encodeURIComponent(poster || '');
     chrome.tabs.create({ url: dlUrl });
     toast('Downloader opened in a new tab.');
   });

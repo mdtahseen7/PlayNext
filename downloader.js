@@ -38,42 +38,131 @@
 
   const imdbId = params.get('imdb') || '';
   const isTv = params.get('tv') === '1';
-  const title = (params.get('title') || 'video').replace(/[\\/:*?"<>|]+/g, '_').slice(0, 80);
+  // Turn the IMDb title into something that reads well and is safe as a filename.
+  const title = (params.get('title') || 'video')
+    .replace(/\s*:\s*/g, ' - ')
+    .replace(/[\\/:*?"<>|]+/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+    .slice(0, 90);
 
   const $ = (id) => document.getElementById(id);
   const statusEl = $('status');
+  const statusText = $('statusText');
   const fillEl = $('fill');
   const detailEl = $('detail');
+  const progressWrap = $('progressWrap');
+  const pctEl = $('pct');
+  const speedEl = $('speed');
+  const etaEl = $('eta');
   const qualityWrap = $('qualityWrap');
   const qualitySel = $('quality');
+  const qualityHint = $('qualityHint');
   const startBtn = $('startBtn');
   const cancelBtn = $('cancelBtn');
+  const againBtn = $('againBtn');
+  const openBtn = $('openBtn');
 
   $('ttl').textContent = title;
+  try {
+    $('ver').textContent = 'v' + (chrome.runtime.getManifest().version || '');
+  } catch (e) { /* no manifest */ }
+
+  // Poster art, when the caller passed one (IMDb page or popup).
+  const posterUrl = params.get('poster') || '';
+  if (posterUrl && /^https?:\/\//i.test(posterUrl)) {
+    const img = $('poster');
+    img.addEventListener('error', () => { $('posterWrap').classList.remove('on'); });
+    img.addEventListener('load', () => { $('posterWrap').classList.add('on'); });
+    img.src = posterUrl;
+  }
   // Don't display the full stream URL (it's long and private to the session).
   try {
-    $('srcLine').textContent = candidates.length ? 'Source: ' + new URL(candidates[0].url).hostname : 'No stream URL was passed.';
+    $('srcLine').textContent = 'Source: ' + new URL(candidates[0].url).hostname;
   } catch (e) {
-    $('srcLine').textContent = candidates.length ? 'Source ready.' : 'No stream URL was passed.';
+    $('srcLine').textContent = candidates.length ? 'Source ready' : 'No stream URL was passed.';
   }
 
   let cancelled = false;
   let running = false;
+  let picked = false;      // quality already chosen, a re-run can skip probing
+  let variants = null;     // parsed master variants
+  let audioRenditions = {}; // group id -> audio playlist url
+  let lastDownloadId = null;
 
+  // ---- UI state helpers -------------------------------------------------
   function setRunning(on) {
     running = on;
-    cancelBtn.style.display = on ? 'inline-block' : 'none';
+    cancelBtn.classList.toggle('hidden', !on);
     startBtn.disabled = on;
+    qualitySel.disabled = on;
+    if (on) {
+      againBtn.classList.add('hidden');
+      openBtn.classList.add('hidden');
+    }
   }
   cancelBtn.addEventListener('click', () => {
     cancelled = true;
-    setStatus('Cancelling…');
+    setStatus('Cancelling, finishing the current segment', 'busy');
   });
 
-  function setStatus(msg) { statusEl.textContent = msg; }
+  function setStatus(msg, kind) {
+    statusText.textContent = msg;
+    statusEl.classList.remove('ok', 'err', 'busy');
+    if (kind) statusEl.classList.add(kind);
+  }
   function setDetail(msg) { detailEl.textContent = msg; }
-  function setProgress(pct) { fillEl.style.width = Math.min(100, Math.max(0, pct)).toFixed(1) + '%'; }
+  function setProgress(pct) {
+    const p = Math.min(100, Math.max(0, pct));
+    fillEl.style.width = p.toFixed(1) + '%';
+    pctEl.textContent = p.toFixed(p < 10 ? 1 : 0);
+  }
+  function showProgress(on) { progressWrap.classList.toggle('hidden', !on); }
+  function setSpeed(text) { speedEl.textContent = text || ''; }
+  function setEta(text) { etaEl.textContent = text || ''; }
   function fmtMB(n) { return (n / 1048576).toFixed(1) + ' MB'; }
+  function fmtTime(s) {
+    if (!isFinite(s) || s < 0) return '';
+    const m = Math.floor(s / 60);
+    const r = Math.floor(s % 60);
+    return m + 'm ' + String(r).padStart(2, '0') + 's';
+  }
+
+  // Finished state: the primary button turns into "Download again" so the
+  // page never looks like it is still waiting for the first download.
+  function finishOk(message) {
+    setRunning(false);
+    setStatus(message, 'ok');
+    startBtn.classList.add('hidden');
+    againBtn.classList.remove('hidden');
+    if (lastDownloadId != null) openBtn.classList.remove('hidden');
+  }
+  function failWith(message) {
+    setRunning(false);
+    setStatus(message, 'err');
+    startBtn.classList.remove('hidden');
+    startBtn.disabled = false;
+    againBtn.classList.add('hidden');
+    openBtn.classList.add('hidden');
+  }
+  againBtn.addEventListener('click', () => {
+    startBtn.classList.remove('hidden');
+    againBtn.classList.add('hidden');
+    openBtn.classList.add('hidden');
+    startBtn.click();
+  });
+  openBtn.addEventListener('click', () => {
+    if (lastDownloadId == null) return;
+    try { chrome.downloads.show(lastDownloadId); } catch (e) { /* ignore */ }
+  });
+
+  // Initial state
+  if (!candidates.length) {
+    setStatus('No stream was passed to this page. Open it from the player.', 'err');
+    startBtn.disabled = true;
+  } else {
+    setStatus('Ready. Press Download to start.', '');
+  }
 
   // ------------------------------------------------------------------
   // Permissions — segment CDNs differ per server, so ask for https/http.
@@ -401,7 +490,14 @@
       url: url,
       filename: 'PlayNext/' + title + (suffix || '') + '.' + ext,
       saveAs: true
-    }, () => { if (chrome.runtime.lastError) setStatus('Save failed: ' + chrome.runtime.lastError.message); });
+    }, (id) => {
+      if (chrome.runtime.lastError) {
+        failWith('Save failed: ' + chrome.runtime.lastError.message);
+        return;
+      }
+      lastDownloadId = id;
+      openBtn.classList.remove('hidden');
+    });
   }
 
   // Sidecar subtitle (OpenSubtitles addon — the same source the player uses
@@ -434,7 +530,10 @@
   // ------------------------------------------------------------------
   async function downloadMp4(url) {
     setRunning(true);
-    setStatus('Saving MP4…');
+    showProgress(true);
+    setProgress(0);
+    setStatus('Requesting the file', 'busy');
+    const started = Date.now();
     const writable = await pickFile(title + '.mp4');
     const chunks = [];
     const res = await fetch(url);
@@ -449,30 +548,43 @@
       got += value.length;
       if (writable) await writable.write({ type: 'write', data: value });
       else chunks.push(value);
+      const elapsed = Math.max(0.001, (Date.now() - started) / 1000);
+      const speed = got / elapsed;
+      setSpeed(fmtMB(speed) + '/s');
       if (total) {
         setProgress((got / total) * 100);
         setDetail(fmtMB(got) + ' of ' + fmtMB(total));
+        setEta(fmtTime((total - got) / speed));
       } else {
         setDetail(fmtMB(got));
       }
     }
     if (writable) await writable.close();
-    setRunning(false);
-    if (cancelled) { setStatus('Cancelled — partial file kept where it was saved.'); return; }
-    if (writable) setStatus('✅ Done — MP4 saved.');
-    else { setStatus('✅ Done — choose a location in the save dialog.'); finishBlob(chunks, 'video/mp4', 'mp4'); }
+    if (cancelled) {
+      setRunning(false);
+      setStatus('Cancelled. The partial file was kept where you saved it.');
+      return;
+    }
+    setProgress(100);
+    setDetail(fmtMB(got));
+    setSpeed('');
+    setEta('');
+    if (!writable) finishBlob(chunks, 'video/mp4', 'mp4');
     const subNote = await saveSubtitleSidecar();
-    if (subNote) setStatus((writable ? '✅ Done — MP4 saved.' : '✅ Done.') + subNote);
+    finishOk('Saved ' + title + '.mp4 with video and audio.' + (subNote || ''));
   }
 
   // Single rendition (video-only or audio-only) download — TS concat or fMP4
   // init+fragments passthrough.
   async function downloadTrack(media, ext, mime, suffix, label) {
     setRunning(true);
+    showProgress(true);
+    setProgress(0);
     const segs = media.segments;
+    const started = Date.now();
     const writable = await pickFile(title + suffix + '.' + ext);
-    if (!writable) setStatus('Saving ' + label + ' to a temp file — a save dialog appears at the end.');
-    else setStatus('Downloading ' + label + '…');
+    if (!writable) setStatus('Saving the ' + label + ' to a temp file. A save dialog appears at the end.', 'busy');
+    else setStatus('Downloading the ' + label, 'busy');
     const totalDur = segs.reduce((s, x) => s + (x.duration || 0), 0);
     let doneDur = 0;
     let bytes = 0;
@@ -505,14 +617,18 @@
       bytes += data.length;
       doneDur += segs[i].duration || 0;
       const pct = totalDur ? (doneDur / totalDur) * 100 : ((i + 1) / segs.length) * 100;
+      const elapsed = Math.max(0.001, (Date.now() - started) / 1000);
+      const speed = bytes / elapsed;
       setProgress(pct);
-      setDetail(fmtMB(bytes) + ' · part ' + (i + 1) + '/' + segs.length);
+      setDetail(fmtMB(bytes) + ' · segment ' + (i + 1) + ' of ' + segs.length);
+      setSpeed(fmtMB(speed) + '/s');
+      if (totalDur) setEta(fmtTime((totalDur - doneDur) / (doneDur / Math.max(0.001, elapsed))));
     }
 
     if (cancelled) {
       if (writable) { try { await writable.close(); } catch (e) { /* ignore */ } }
       setRunning(false);
-      setStatus('Cancelled — partial file kept where it was saved.');
+      setStatus('Cancelled. The partial file was kept where you saved it.');
       return;
     }
     if (writable) await writable.close();
@@ -524,20 +640,23 @@
   // (both fMP4) into one proper .mp4 file.
   async function downloadMuxed(vMedia, aMedia, audioUrl) {
     setRunning(true);
+    showProgress(true);
+    setProgress(0);
     const segs = vMedia.segments;
     const totalDur = Math.max(
       segs.reduce((s, x) => s + (x.duration || 0), 0),
       aMedia.segments.reduce((s, x) => s + (x.duration || 0), 0)
     );
+    const started = Date.now();
 
-    setStatus('Merging video + audio tracks…');
+    setStatus('Preparing the video and audio tracks', 'busy');
     const vInit = await fetchOne({ url: vMedia.init.url, seq: 0, range: vMedia.init.range ? parseByteRange(vMedia.init.range, null) : null });
     const aInit = await fetchOne({ url: aMedia.init.url, seq: 0, range: aMedia.init.range ? parseByteRange(aMedia.init.range, null) : null });
     const merged = buildMergedMoov(vInit, aInit, totalDur);
 
     const writable = await pickFile(title + '.mp4');
-    if (!writable) setStatus('Merging into a temp file — a save dialog appears at the end.');
-    else setStatus('Downloading (video + audio)…');
+    if (!writable) setStatus('Building the file in memory. A save dialog appears at the end.', 'busy');
+    else setStatus('Downloading video and audio', 'busy');
     const chunks = [];
     let bytes = merged.ftyp.length + merged.moov.length;
     if (writable) {
@@ -582,22 +701,28 @@
       }
       const doneDur = Math.min(i + 1, segs.length) * (segs[i] ? segs[i].duration : 0) || ((i + 1) / n) * totalDur;
       const pct = totalDur ? (Math.min(i + 1, n) / n) * 100 : 0;
+      const elapsed = Math.max(0.001, (Date.now() - started) / 1000);
+      const speed = bytes / elapsed;
       setProgress(pct);
-      setDetail(fmtMB(bytes) + ' · segment ' + (i + 1) + '/' + n);
+      setDetail(fmtMB(bytes) + ' · segment ' + (i + 1) + ' of ' + n);
+      setSpeed(fmtMB(speed) + '/s');
+      if (totalDur) setEta(fmtTime((totalDur - doneDur) / (doneDur / Math.max(0.001, elapsed))));
     }
 
     if (cancelled) {
       if (writable) { try { await writable.close(); } catch (e) { /* ignore */ } }
       setRunning(false);
-      setStatus('Cancelled — partial file kept where it was saved.');
+      setStatus('Cancelled. The partial file was kept where you saved it.');
       return;
     }
     if (writable) await writable.close();
     else finishBlob(chunks, 'video/mp4', 'mp4', '');
-    setRunning(false);
-    const base = writable ? '✅ Done — ' + title + '.mp4 saved (video + audio).' : '✅ Done — choose a location in the save dialog.';
+    setProgress(100);
+    setDetail(fmtMB(bytes));
+    setSpeed('');
+    setEta('');
     const subNote = await saveSubtitleSidecar();
-    setStatus(base + (subNote || ''));
+    finishOk('Saved ' + title + '.mp4 with video and audio.' + (subNote || ''));
   }
 
   async function downloadVariant(variantUrl, audioUrl) {
@@ -625,34 +750,46 @@
       if (audioUrl && !cancelled) {
         const aMedia = parseMedia(await fetchText(audioUrl), audioUrl);
         if (aMedia.segments.length) {
-          setStatus('Video saved. Now saving the separate audio track…');
+          setStatus('Video saved. Now saving the separate audio track.', 'busy');
           await downloadTrack(aMedia, 'ts', 'video/mp2t', ' (audio)', 'audio track');
           const subNote = await saveSubtitleSidecar();
-          if (subNote) setStatus('✅ Video + audio saved as two files.' + subNote + ' Play the video file; keep the audio file for the soundtrack.');
-          else setStatus('✅ Video + audio saved as two files.');
+          finishOk('Saved the video and the audio track as two files.' + (subNote || ''));
           return;
         }
       }
     }
     const subNote = await saveSubtitleSidecar();
-    if (subNote) setStatus('✅ Done.' + subNote);
-    else setStatus('✅ Done.');
+    finishOk('Download finished.' + (subNote || ''));
+  }
+
+  // Runs the download with the chosen quality.
+  async function runDownload() {
+    const v = variants[+qualitySel.value || 0];
+    const audioUrl = v.audioGroup ? audioRenditions[v.audioGroup] : null;
+    await downloadVariant(v.url, audioUrl);
   }
 
   startBtn.addEventListener('click', async () => {
     if (running) return;
     startBtn.disabled = true;
+    cancelled = false;
     try {
       if (!candidates.length) throw new Error('No stream URL was passed.');
-      if (!cancelled) {
-        setStatus('Requesting network permission…');
-        const ok = await ensurePermission();
-        if (!ok) { setStatus('Permission denied — cannot download.'); startBtn.disabled = false; return; }
+
+      // Quality already picked (or only one available): go straight to work.
+      if (picked && variants && variants.length) {
+        setRunning(true);
+        await runDownload();
+        return;
       }
+
+      setStatus('Requesting network permission', 'busy');
+      const ok = await ensurePermission();
+      if (!ok) { failWith('Permission denied, so the download cannot run.'); return; }
 
       // Direct MP4?
       const mp4 = candidates.find((c) => c.kind === 'mp4' || /\.mp4(\?|$)/i.test(c.url.split('?')[0]));
-      if (mp4) { await downloadMp4(mp4.url); return; }
+      if (mp4) { setRunning(true); await downloadMp4(mp4.url); return; }
 
       // HLS: find a master playlist (gives quality options), else a media playlist.
       let master = null;
@@ -666,11 +803,12 @@
           if (text.includes('#EXTINF') && !mediaSingle) mediaSingle = c.url;
         } catch (e) { lastErr = e; }
       }
-      if (cancelled) { setStatus('Cancelled.'); return; }
+      if (cancelled) { setRunning(false); setStatus('Cancelled.'); return; }
 
       if (master) {
         const parsed = parseMaster(master.text, master.url);
-        const variants = parsed.variants;
+        variants = parsed.variants;
+        audioRenditions = parsed.audioRenditions;
         if (variants.length > 1) {
           qualitySel.innerHTML = '';
           variants.forEach((v, i) => {
@@ -679,41 +817,32 @@
             o.textContent = (v.res ? v.res + ' · ' : '') + (v.bandwidth ? Math.round(v.bandwidth / 1000) + ' kbps' : 'variant ' + (i + 1));
             qualitySel.appendChild(o);
           });
-          qualityWrap.style.display = 'block';
-          setStatus('Pick a quality, then press Download again.');
-          startBtn.textContent = 'Download';
+          qualityHint.textContent = variants.length + ' qualities available. The highest is selected by default.';
+          qualityWrap.classList.remove('hidden');
+          picked = true;
+          setRunning(false);
           startBtn.disabled = false;
-          running = true; // block re-entry until handler below swaps logic
-          let chosen = false;
-          startBtn.onclick = async () => {
-            if (chosen) return;
-            chosen = true;
-            startBtn.disabled = true;
-            qualityWrap.style.display = 'none';
-            try {
-              const v = variants[+qualitySel.value || 0];
-              await downloadVariant(v.url, v.audioGroup ? parsed.audioRenditions[v.audioGroup] : null);
-            } catch (e) {
-              setStatus('Error: ' + e.message);
-              startBtn.disabled = false;
-              running = false;
-              cancelBtn.style.display = 'none';
-            }
-          };
+          setStatus('Pick a quality, then press Download.', 'busy');
           return;
         }
         const v = variants.length ? variants[0] : { url: master.url, audioGroup: null };
-        await downloadVariant(v.url, v.audioGroup ? parsed.audioRenditions[v.audioGroup] : null);
+        variants = [v];
+        picked = true;
+        setRunning(true);
+        await runDownload();
         return;
       }
 
-      if (mediaSingle) { await downloadVariant(mediaSingle, null); return; }
+      if (mediaSingle) {
+        variants = [{ url: mediaSingle, audioGroup: null }];
+        picked = true;
+        setRunning(true);
+        await runDownload();
+        return;
+      }
       throw lastErr || new Error('Could not read a playlist from the given URLs.');
     } catch (e) {
-      setStatus('Error: ' + e.message);
-      startBtn.disabled = false;
-      running = false;
-      cancelBtn.style.display = 'none';
+      failWith(e.message || String(e));
     }
   });
 })();
