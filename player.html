@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <title>PlayNext Player</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #000000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #eee;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    #bar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 9px 16px;
+      background: #0a0a0a;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      flex: 0 0 auto;
+    }
+    #bar .brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #ededed;
+      font-size: 13px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    #title {
+      flex: 1;
+      font-weight: 700;
+      font-size: 14px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #fsBtn, #subsBtn, #dlBtn {
+      background: #0070f3;
+      border: none;
+      color: #fff;
+      font-weight: 700;
+      padding: 7px 14px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    #subsBtn, #dlBtn { background: rgba(255, 255, 255, 0.06); color: #ededed; border: 1px solid rgba(255, 255, 255, 0.14); }
+    #subsBtn:hover, #fsBtn:hover, #dlBtn:hover { filter: brightness(1.08); }
+    #wrap { flex: 1; min-height: 0; }
+    iframe { width: 100%; height: 100%; border: 0; display: block; background: #000; }
+    #err {
+      display: none;
+      padding: 24px;
+      font-size: 14px;
+      color: #f87171;
+    }
+  </style>
+  <link rel="stylesheet" href="content.css">
+</head>
+
+<body>
+  <div id="bar">
+    <span class="brand">▲ PlayNext</span>
+    <span id="title">Loading…</span>
+    <button id="dlBtn" title="Download the current stream as a file">⬇ Download</button>
+    <button id="subsBtn" title="Subtitle settings">CC Subtitles</button>
+    <button id="fsBtn">⛶ Fullscreen</button>
+  </div>
+  <div id="wrap"></div>
+  <div id="err">Invalid player URL.</div>
+  <script src="subs-panel.js"></script>
+  <script src="stream-link.js"></script>
+  <script src="player.js"></script>
+</body>
+
+</html>

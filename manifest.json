@@ -1,0 +1,75 @@
+{
+  "manifest_version": 3,
+  "name": "PlayNext",
+  "version": "2.0.0",
+  "description": "Watch movies and TV shows right from IMDb pages. One click, instant playback, subtitles, progress sync and downloads.",
+  "permissions": [
+    "storage",
+    "downloads"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "host_permissions": [
+    "*://*.imdb.com/*",
+    "*://imdb.com/*",
+    "*://vidnest.fun/*",
+    "*://new.vidnest.fun/*",
+    "*://api.themoviedb.org/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.imdb.com/*",
+        "*://imdb.com/*"
+      ],
+      "js": [
+        "subs-panel.js",
+        "stream-link.js",
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "*://vidnest.fun/*",
+        "*://new.vidnest.fun/*"
+      ],
+      "all_frames": true,
+      "js": [
+        "sub-settings-bridge.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "*://vidnest.fun/*",
+        "*://new.vidnest.fun/*"
+      ],
+      "all_frames": true,
+      "js": [
+        "block-popups.js",
+        "subtitle-fallback.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "PlayNext Settings",
+    "default_icon": "icons/logo.png"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
