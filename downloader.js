@@ -38,6 +38,8 @@
 
   const imdbId = params.get('imdb') || '';
   const isTv = params.get('tv') === '1';
+  const season = params.get('season') || '';
+  const episode = params.get('episode') || '';
   // Turn the IMDb title into something that reads well and is safe as a filename.
   const title = (params.get('title') || 'video')
     .replace(/\s*:\s*/g, ' - ')
@@ -47,6 +49,13 @@
     .slice(0, 90);
 
   const $ = (id) => document.getElementById(id);
+  // The muxer lives in its own file so the exact same code can be tested
+  // outside the browser.
+  const Mux = window.PlayNextMuxer;
+  if (!Mux) {
+    document.getElementById('statusText').textContent = 'The muxer failed to load. Reload the extension.';
+    return;
+  }
   const statusEl = $('status');
   const statusText = $('statusText');
   const fillEl = $('fill');
@@ -326,148 +335,6 @@
   }
 
   // ------------------------------------------------------------------
-  // ISOBMFF toolkit + fMP4 muxer (merges demuxed video/audio renditions)
-  // ------------------------------------------------------------------
-  function concatBytes(list) {
-    let total = 0;
-    for (const a of list) total += a.length;
-    const out = new Uint8Array(total);
-    let p = 0;
-    for (const a of list) { out.set(a, p); p += a.length; }
-    return out;
-  }
-  function readU32(b, o) { return ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0; }
-  function writeU32(b, o, v) {
-    b[o] = (v >>> 24) & 0xff; b[o + 1] = (v >>> 16) & 0xff;
-    b[o + 2] = (v >>> 8) & 0xff; b[o + 3] = v & 0xff;
-  }
-  function readBoxes(buf, start, end) {
-    const out = [];
-    let p = start || 0;
-    end = end == null ? buf.length : end;
-    while (p + 8 <= end) {
-      let size = readU32(buf, p);
-      const type = String.fromCharCode(buf[p + 4], buf[p + 5], buf[p + 6], buf[p + 7]);
-      let hdr = 8;
-      if (size === 1) {
-        const hi = readU32(buf, p + 8), lo = readU32(buf, p + 12);
-        size = hi * 4294967296 + lo;
-        hdr = 16;
-      } else if (size === 0) {
-        size = end - p;
-      }
-      if (size < hdr || p + size > end) return out; // corrupt — stop
-      out.push({ type: type, start: p, size: size, contentStart: p + hdr });
-      p += size;
-    }
-    return out;
-  }
-  function children(box, buf) { return readBoxes(buf, box.contentStart, box.start + box.size); }
-  function findAllIn(box, buf, type) { return children(box, buf).filter((b) => b.type === type); }
-  function findFirstIn(box, buf, type) { return children(box, buf).find((b) => b.type === type) || null; }
-  function sliceBox(box, buf) { return buf.subarray(box.start, box.start + box.size); }
-
-  function analyzeTrak(trakBox, buf) {
-    const tkhd = findFirstIn(trakBox, buf, 'tkhd');
-    if (!tkhd) return null;
-    const cs = tkhd.contentStart;
-    const version = buf[cs];
-    const idOff = cs + 4 + (version ? 16 : 8); // ctime+mtime are 8 bytes each in v1
-    const id = readU32(buf, idOff);
-    const mdia = findFirstIn(trakBox, buf, 'mdia');
-    let handler = '';
-    if (mdia) {
-      const hdlr = findFirstIn(mdia, buf, 'hdlr');
-      if (hdlr) handler = String.fromCharCode(buf[hdlr.contentStart + 8], buf[hdlr.contentStart + 9], buf[hdlr.contentStart + 10], buf[hdlr.contentStart + 11]);
-    }
-    return { box: trakBox, id: id, idOff: idOff, handler: handler };
-  }
-
-  // Build a dual-track moov from the video and audio init segments.
-  function buildMergedMoov(videoInit, audioInit, totalDurationSec) {
-    const vMoov = readBoxes(videoInit).find((b) => b.type === 'moov');
-    const aMoov = readBoxes(audioInit).find((b) => b.type === 'moov');
-    if (!vMoov || !aMoov) throw new Error('init segments missing moov');
-    const vTraks = findAllIn(vMoov, videoInit, 'trak').map((t) => analyzeTrak(t, videoInit));
-    const aTraks = findAllIn(aMoov, audioInit, 'trak').map((t) => analyzeTrak(t, audioInit));
-    const vTrak = vTraks.find((t) => t && t.handler === 'vide') || vTraks[0];
-    const aTrak = aTraks.find((t) => t && t.handler === 'soun') || aTraks[0];
-    if (!vTrak || !aTrak) throw new Error('traks not found');
-
-    let audioPatchedInit = null;
-    let audioNewId = aTrak.id;
-    if (vTraks.some((t) => t && t.id === aTrak.id)) {
-      audioNewId = Math.max.apply(null, vTraks.map((t) => t.id).concat([aTrak.id])) + 1;
-      audioPatchedInit = new Uint8Array(audioInit); // copy for patching
-      writeU32(audioPatchedInit, aTrak.idOff, audioNewId);
-    }
-
-    // mvex (mandatory for fragmented MP4): collect trex from both, patch ids.
-    let mvexParts = [];
-    const vMvex = findFirstIn(vMoov, videoInit, 'mvex');
-    const aMvex = findFirstIn(aMoov, audioPatchedInit || audioInit, 'mvex');
-    if (vMvex) for (const t of findAllIn(vMvex, videoInit, 'trex')) mvexParts.push(new Uint8Array(sliceBox(t, videoInit)));
-    if (aMvex) {
-      const aInit2 = audioPatchedInit || audioInit;
-      for (const t of findAllIn(aMvex, aInit2, 'trex')) {
-        const tb = new Uint8Array(sliceBox(t, aInit2));
-        writeU32(tb, 8 + 4, audioNewId); // trex: version+flags(4) then track_ID(4)
-        mvexParts.push(tb);
-      }
-    }
-    if (!mvexParts.length) throw new Error('no trex boxes');
-    const mvexBody = concatBytes(mvexParts);
-    const mvexFull = concatBytes([u32box('mvex', mvexBody.length), mvexBody]);
-
-    // mvhd from the video init, duration patched to the full runtime.
-    const vMvhd = findFirstIn(vMoov, videoInit, 'mvhd');
-    if (!vMvhd) throw new Error('no mvhd');
-    const mvhdBuf = new Uint8Array(sliceBox(vMvhd, videoInit));
-    const version = mvhdBuf[8];
-    const tsOff = 8 + 4 + (version ? 16 : 8); // skip version+flags+ctime+mtime
-    const timescale = readU32(mvhdBuf, tsOff) || 1000;
-    writeU32(mvhdBuf, tsOff + 4, Math.floor(totalDurationSec * timescale));
-
-    const vTrakBytes = new Uint8Array(sliceBox(vTrak.box, videoInit));
-    const aTrakBytes = new Uint8Array(sliceBox(aTrak.box, audioPatchedInit || audioInit));
-    const moovBody = concatBytes([mvhdBuf, vTrakBytes, aTrakBytes, mvexFull]);
-    const moovFull = concatBytes([u32box('moov', moovBody.length), moovBody]);
-
-    const ftypBox = readBoxes(videoInit).find((b) => b.type === 'ftyp');
-    const ftypFull = ftypBox ? new Uint8Array(sliceBox(ftypBox, videoInit))
-      : concatBytes([new Uint8Array([0, 0, 0, 24]), strBytes('ftypisom\x00\x00\x02\x00isomiso2avc1mp41')]);
-
-    return { moov: moovFull, ftyp: ftypFull, audioNewId: audioNewId, videoId: vTrak.id };
-  }
-  function u32box(type, bodyLen) {
-    const b = new Uint8Array(8);
-    writeU32(b, 0, 8 + bodyLen);
-    for (let i = 0; i < 4; i++) b[4 + i] = type.charCodeAt(i);
-    return b;
-  }
-  function strBytes(s) {
-    const out = new Uint8Array(s.length);
-    for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
-    return out;
-  }
-
-  // Patch a fragment: renumber mfhd sequence, force tfhd track id.
-  function patchSegment(seg, trackId, seq) {
-    const buf = new Uint8Array(seg); // copy
-    const tops = readBoxes(buf);
-    for (const top of tops) {
-      if (top.type !== 'moof') continue;
-      const mfhd = findFirstIn(top, buf, 'mfhd');
-      if (mfhd) writeU32(buf, mfhd.contentStart + 4, seq);
-      for (const traf of findAllIn(top, buf, 'traf')) {
-        const tfhd = findFirstIn(traf, buf, 'tfhd');
-        if (tfhd) writeU32(buf, tfhd.contentStart + 4, trackId);
-      }
-    }
-    return buf;
-  }
-
-  // ------------------------------------------------------------------
   // Output: File System Access first, Blob fallback second
   // ------------------------------------------------------------------
   async function pickFile(suggestedName) {
@@ -500,28 +367,50 @@
     });
   }
 
-  // Sidecar subtitle (OpenSubtitles addon — the same source the player uses
-  // for fallback subs). Saved next to the download so VLC/mpv auto-load it.
-  async function saveSubtitleSidecar() {
+  // Subtitle lookup through the OpenSubtitles addon, the same source the
+  // player uses for its fallback subtitles. Returns the raw SRT text, the
+  // parsed cues and the language.
+  async function fetchSubtitleData() {
     if (!imdbId || !/^tt\d+$/.test(imdbId)) return null;
+    // The addon only answers on routes that end in .json. For series the id
+    // carries the episode, e.g. tt0903747:1:1.
+    let lookupId = imdbId;
+    if (isTv && season && episode) lookupId = `${imdbId}:${season}:${episode}`;
+    const api = 'https://opensubtitles-v3.strem.io/subtitles';
     try {
-      const res = await fetch(`https://opensubtitles-v3.strem.io/subtitles/${isTv ? 'tv' : 'movie'}/${imdbId}`);
+      const res = await fetch(`${api}/${isTv ? 'tv' : 'movie'}/${encodeURIComponent(lookupId)}.json`);
       if (!res.ok) return null;
       const data = await res.json();
       const list = Array.isArray(data) ? data : (data && Array.isArray(data.subtitles) ? data.subtitles : []);
-      const pick = list.find((s) => s && s.url && (s.lang || '').toLowerCase().startsWith('en')) || (list[0] && list[0].url ? list[0] : null);
-      if (pick && pick.url) {
-        const sub = await fetch(pick.url);
-        const text = await sub.text();
-        const blob = new Blob([text], { type: 'text/plain' });
-        chrome.downloads.download({
-          url: URL.createObjectURL(blob),
-          filename: 'PlayNext/' + title + '.en.srt',
-          saveAs: false
-        });
-        return ' Subtitle saved to Downloads/PlayNext/ — keep it next to the video for auto-load.';
-      }
+      if (!list.length) return null;
+      const pick = list.find((s) => s && s.url && (s.lang || '').toLowerCase().startsWith('en'))
+        || list.find((s) => s && s.url);
+      if (!pick || !pick.url) return null;
+      const sub = await fetch(pick.url);
+      if (!sub.ok) return null;
+      const text = await sub.text();
+      if (!text || text.length < 20) return null;
+      const cues = Mux.parseSrtCues(text);
+      const lang = (pick.lang || 'en').toLowerCase().slice(0, 2);
+      return { text: text, cues: cues, lang: lang };
     } catch (e) { /* subtitles are best effort */ }
+    return null;
+  }
+
+  // Sidecar subtitle saved next to the download so players like VLC pick it
+  // up automatically, even if they ignore the embedded track.
+  function saveSubtitleSidecar(subs) {
+    if (!subs || !subs.text) return null;
+    try {
+      const srt = subs.text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim() + '\n';
+      const blob = new Blob([srt], { type: 'application/x-subrip' });
+      chrome.downloads.download({
+        url: URL.createObjectURL(blob),
+        filename: 'PlayNext/' + title + '.' + subs.lang + '.srt',
+        saveAs: false
+      });
+      return ' A matching subtitle file was saved next to it in Downloads/PlayNext/.';
+    } catch (e) { /* best effort */ }
     return null;
   }
 
@@ -570,7 +459,7 @@
     setSpeed('');
     setEta('');
     if (!writable) finishBlob(chunks, 'video/mp4', 'mp4');
-    const subNote = await saveSubtitleSidecar();
+    const subNote = saveSubtitleSidecar(await fetchSubtitleData());
     finishOk('Saved ' + title + '.mp4 with video and audio.' + (subNote || ''));
   }
 
@@ -637,7 +526,8 @@
   }
 
   // The main event: merge a video rendition and its separate audio rendition
-  // (both fMP4) into one proper .mp4 file.
+  // (both fMP4) into one proper .mp4 file, with the subtitles embedded as a
+  // real text track when a subtitle file could be found.
   async function downloadMuxed(vMedia, aMedia, audioUrl) {
     setRunning(true);
     showProgress(true);
@@ -651,8 +541,19 @@
 
     setStatus('Preparing the video and audio tracks', 'busy');
     const vInit = await fetchOne({ url: vMedia.init.url, seq: 0, range: vMedia.init.range ? parseByteRange(vMedia.init.range, null) : null });
-    const aInit = await fetchOne({ url: aMedia.init.url, seq: 0, range: aMedia.init.range ? parseByteRange(aMedia.init.range, null) : null });
-    const merged = buildMergedMoov(vInit, aInit, totalDur);
+    const aInitRaw = await fetchOne({ url: aMedia.init.url, seq: 0, range: aMedia.init.range ? parseByteRange(aMedia.init.range, null) : null });
+
+    // Subtitles: embedded in the file and also saved as a sidecar.
+    const subs = await fetchSubtitleData();
+    const subTrackId = (subs && subs.cues.length) ? 3 : null;
+
+    // Put the audio on the same timescale as the video so the file has one
+    // timeline and every player reports the correct duration.
+    const vTs = Mux.getTrackTimescale(vInit);
+    const aTs = Mux.getTrackTimescale(aInitRaw);
+    const aInit = (aTs !== vTs) ? Mux.rescaleInitTimescale(aInitRaw, vTs) : aInitRaw;
+
+    const merged = Mux.buildMergedMoov(vInit, aInit, totalDur, subTrackId, vTs);
 
     const writable = await pickFile(title + '.mp4');
     if (!writable) setStatus('Building the file in memory. A save dialog appears at the end.', 'busy');
@@ -687,17 +588,38 @@
       pendingPairs.delete(i);
       const vData = pair[0], aData = pair[1];
       if (!vData && !aData) continue; // both failed — skip pair
+      let audioStart = 0;
+      let audioDur = 0;
       if (vData) {
-        const p = patchSegment(vData, merged.videoId, seq++);
+        // Drop the styp/sidx boxes: they describe the original single segment
+        // file and would make players compute a wrong duration.
+        const p = Mux.patchSegment(Mux.stripSegmentHeaders(vData), merged.videoId, seq++);
         if (writable) await writable.write({ type: 'write', data: p });
         else chunks.push(p);
         bytes += p.length;
       }
       if (aData) {
-        const p = patchSegment(aData, merged.audioNewId, seq++);
+        const scaled = (aTs !== vTs) ? Mux.rescaleFragmentTimescale(aData, aTs, vTs) : aData;
+        audioStart = Mux.getFragmentStart(scaled, vTs);
+        audioDur = Mux.getFragmentDuration(scaled, vTs);
+        const p = Mux.patchSegment(Mux.stripSegmentHeaders(scaled), merged.audioNewId, seq++);
         if (writable) await writable.write({ type: 'write', data: p });
         else chunks.push(p);
         bytes += p.length;
+      }
+      // Subtitles: a text track fragment for the part of the timeline this
+      // pair covers.
+      if (subTrackId != null && subs && subs.cues.length && audioDur > 0) {
+        const sub = Mux.buildSubtitleFragment(subs.cues, subTrackId, vTs, audioStart, audioStart + audioDur, seq++);
+        if (sub) {
+          if (writable) {
+            await writable.write({ type: 'write', data: sub.moof });
+            await writable.write({ type: 'write', data: sub.mdat });
+          } else {
+            chunks.push(sub.moof, sub.mdat);
+          }
+          bytes += sub.moof.length + sub.mdat.length;
+        }
       }
       const doneDur = Math.min(i + 1, segs.length) * (segs[i] ? segs[i].duration : 0) || ((i + 1) / n) * totalDur;
       const pct = totalDur ? (Math.min(i + 1, n) / n) * 100 : 0;
@@ -721,8 +643,8 @@
     setDetail(fmtMB(bytes));
     setSpeed('');
     setEta('');
-    const subNote = await saveSubtitleSidecar();
-    finishOk('Saved ' + title + '.mp4 with video and audio.' + (subNote || ''));
+    const subNote = saveSubtitleSidecar(subs);
+    finishOk('Saved ' + title + '.mp4 with video and audio.' + (subs && subs.cues.length ? ' Subtitles are embedded in the file.' : '') + (subNote || ''));
   }
 
   async function downloadVariant(variantUrl, audioUrl) {
@@ -752,13 +674,13 @@
         if (aMedia.segments.length) {
           setStatus('Video saved. Now saving the separate audio track.', 'busy');
           await downloadTrack(aMedia, 'ts', 'video/mp2t', ' (audio)', 'audio track');
-          const subNote = await saveSubtitleSidecar();
+          const subNote = saveSubtitleSidecar(await fetchSubtitleData());
           finishOk('Saved the video and the audio track as two files.' + (subNote || ''));
           return;
         }
       }
     }
-    const subNote = await saveSubtitleSidecar();
+    const subNote = saveSubtitleSidecar(await fetchSubtitleData());
     finishOk('Download finished.' + (subNote || ''));
   }
 

@@ -27,6 +27,7 @@ $files = @(
   'downloader.js',
   'player.html',
   'player.js',
+  'mp4-muxer.js',
   'stream-link.js',
   'sub-settings-bridge.js',
   'subs-panel.js',

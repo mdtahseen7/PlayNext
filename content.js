@@ -262,6 +262,10 @@
       let url = `${VIDNEST_URL}/tv/${tmdbId}/${season}/${episode}?imdb=${imdbId}&progress=${tmdbId}`;
       if (firstEpisodeSet && pendingResumePos != null) url += `&startAt=${pendingResumePos}`;
       firstEpisodeSet = false;
+      // Remember the current episode so the downloader can fetch the matching
+      // subtitle sidecar.
+      currentSeason = String(season);
+      currentEpisode = String(episode);
       iframe.src = url;
     }
 
@@ -312,6 +316,9 @@
       const urlEpisode = String((resume && resume.episode) || 1);
       if (String(defaultSeason.season_number) !== urlSeason || epVal !== urlEpisode) {
         setEpisode(defaultSeason.season_number, epVal);
+      } else {
+        currentSeason = urlSeason;
+        currentEpisode = urlEpisode;
       }
 
       seasonSel.addEventListener('change', async () => {
@@ -338,6 +345,10 @@
   // We persist them per IMDb id and use them to reopen the right episode.
   let activeInfo = null;
   let lastProgressSave = 0;
+  // Currently selected season/episode of the TV selector (used by the
+  // downloader to look up the matching subtitle sidecar).
+  let currentSeason = null;
+  let currentEpisode = null;
 
   // Latest playback position reported by the player — used to preserve the
   // exact spot when the iframe gets reloaded (PiP moves reload iframes).
@@ -584,6 +595,8 @@
           + '&title=' + encodeURIComponent((h1 && h1.innerText) || 'video')
           + '&imdb=' + encodeURIComponent(info.imdb_id)
           + '&tv=' + (isTvType(info.media_type) ? '1' : '0')
+          + '&season=' + encodeURIComponent(currentSeason || '')
+          + '&episode=' + encodeURIComponent(currentEpisode || '')
           + '&poster=' + encodeURIComponent((posterImg && posterImg.src) || '');
         chrome.runtime.sendMessage({ action: 'open_new_tab', url: dlUrl });
       } catch (e) {

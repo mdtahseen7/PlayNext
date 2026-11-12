@@ -11,6 +11,15 @@
   const title = params.get('title') || 'PlayNext';
   const poster = params.get('poster') || null;
 
+  // Season and episode for series, read from the provider URL
+  // (.../tv/{tmdbId}/{season}/{episode}). Used for the subtitle sidecar.
+  let tvSeason = params.get('season') || '';
+  let tvEpisode = params.get('episode') || '';
+  if (isTv && (!tvSeason || !tvEpisode)) {
+    const m = /\/tv\/\d+\/(\d+)\/(\d+)/.exec(src);
+    if (m) { tvSeason = m[1]; tvEpisode = m[2]; }
+  }
+
   // Only allow known player hosts — never let this page embed arbitrary URLs.
   if (!/^https:\/\/([\w-]+\.)*(vidnest\.fun)(\/|$)/.test(src)) {
     document.getElementById('wrap').style.display = 'none';
@@ -52,12 +61,17 @@
     }
     const payload = encodeURIComponent(JSON.stringify(res.urls));
     // imdb + tv feed the subtitle sidecar lookup in the downloader page.
-    const safeTitle = title.replace(/\s*:\s*/g, ' - ').replace(/[\\/:*?"<>|]+/g, '').trim();
+    let safeTitle = title.replace(/\s*:\s*/g, ' - ').replace(/[\\/:*?"<>|]+/g, '').trim();
+    if (isTv && tvSeason && tvEpisode && !/\bS\d{2}E\d{2}\b/.test(safeTitle)) {
+      safeTitle += ' S' + String(tvSeason).padStart(2, '0') + 'E' + String(tvEpisode).padStart(2, '0');
+    }
     const dlUrl = chrome.runtime.getURL('downloader.html')
       + '?urls=' + payload
       + '&title=' + encodeURIComponent(safeTitle)
       + '&imdb=' + encodeURIComponent(imdbId)
       + '&tv=' + (isTv ? '1' : '0')
+      + '&season=' + encodeURIComponent(tvSeason || '')
+      + '&episode=' + encodeURIComponent(tvEpisode || '')
       + '&poster=' + encodeURIComponent(poster || '');
     chrome.tabs.create({ url: dlUrl });
     toast('Downloader opened in a new tab.');

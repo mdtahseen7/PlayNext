@@ -206,7 +206,9 @@
     if (cache.has(key)) return cache.get(key);
     let mapped = [];
     try {
-      const res = await fetch(`${OS_API}/${ctx.type}/${encodeURIComponent(ctx.id)}`);
+      // The addon only serves this route with the .json suffix. Without it the
+      // request 404s and the fallback silently returns nothing.
+      const res = await fetch(`${OS_API}/${ctx.type}/${encodeURIComponent(ctx.id)}.json`);
       if (res.ok) {
         const data = await res.json();
         const list = Array.isArray(data) ? data : (data && Array.isArray(data.subtitles) ? data.subtitles : []);
