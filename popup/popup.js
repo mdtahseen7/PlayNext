@@ -255,7 +255,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Set this to "<your-github-username>/PlayNext" once the repo is public.
   // While it points at the placeholder, the GitHub + update-check buttons
   // are hidden so nothing links anywhere unexpected.
-  const GITHUB_REPO = 'YOUR_USERNAME/PlayNext';
+  const GITHUB_REPO = 'mdtahseen7/PlayNext';
   const HAS_REPO = !/YOUR_USERNAME/.test(GITHUB_REPO);
   const manifest = chrome.runtime.getManifest();
   const currentVersion = manifest.version;
