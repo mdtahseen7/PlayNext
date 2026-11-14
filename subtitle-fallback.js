@@ -213,21 +213,33 @@
       if (res.ok) {
         const data = await res.json();
         const list = Array.isArray(data) ? data : (data && Array.isArray(data.subtitles) ? data.subtitles : []);
-        mapped = list
-          .filter(s => s && s.url)
-          .map(s => {
-            const code = (s.lang || '').toLowerCase();
-            const name = LANG_NAMES[code] || s.lang || 'Unknown';
-            // Include both field shapes so whichever mapper the player uses
-            // (wyzie: url/display/language, vdrk: file/label) works.
-            return {
-              url: s.url,
-              file: s.url,
-              lang: s.lang || code,
-              display: name,
-              label: name
-            };
-          });
+        // Pick the first English subtitle, fetch it, convert SRT->VTT and
+        // hand the player a blob URL it can actually render (browsers only
+        // play VTT in <track> elements, not SRT).
+        const pick = list.find((s) => s && s.url && (s.lang || '').toLowerCase().startsWith('en'))
+          || (list[0] && list[0].url ? list[0] : null);
+        if (pick && pick.url) {
+          try {
+            const sub = await fetch(pick.url);
+            if (sub.ok) {
+              const text = await sub.text();
+              if (text && text.length > 20) {
+                const vtt = srtToVtt(text);
+                const blobUrl = URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' }));
+                const code = (pick.lang || '').toLowerCase();
+                const name = LANG_NAMES[code] || pick.lang || 'English';
+                mapped = [{
+                  url: blobUrl,
+                  file: blobUrl,
+                  lang: pick.lang || code,
+                  display: name,
+                  label: name
+                }];
+                console.log('[PlayNext] OpenSubtitles fallback ready:', name, mapped[0].url.slice(0, 40));
+              }
+            }
+          } catch (e) { console.log('[PlayNext] subtitle fetch failed:', e.message); }
+        }
       }
     } catch (e) { /* keep mapped = [] */ }
     cache.set(key, mapped);
