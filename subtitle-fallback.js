@@ -206,6 +206,7 @@
     if (cache.has(key)) return cache.get(key);
     let mapped = [];
     try {
+      console.log('[PlayNext] Fetching subtitle fallback for', key);
       // The addon only serves this route with the .json suffix. Without it the
       // request 404s and the fallback silently returns nothing.
       const res = await fetch(`${OS_API}/${ctx.type}/${encodeURIComponent(ctx.id)}.json`);
@@ -311,8 +312,13 @@
     return origFetch(input, init).then(async (res) => {
       const items = await parseItems(res);
       if (items && items.length) return res; // provider worked
+      console.log('[PlayNext] Provider subtitles empty, trying OpenSubtitles fallback');
       const fb = await fallback;
-      return (fb && fb.length) ? syntheticResponse(fb) : res;
+      if (fb && fb.length) {
+        console.log('[PlayNext] OpenSubtitles fallback returned', fb.length, 'tracks');
+        return syntheticResponse(fb);
+      }
+      return res;
     }).catch(async (err) => {
       const fb = await fallback;
       if (fb && fb.length) return syntheticResponse(fb);
